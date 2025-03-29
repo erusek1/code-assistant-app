@@ -288,7 +288,10 @@ class LLMService:
         start_time = time.time()
         
         # Prepare API URL
-        api_url = f"{config.OLLAMA_BASE_URL}/api/{config.OLLAMA_API_VERSION}/generate"
+        if config.OLLAMA_API_VERSION:
+            api_url = f"{config.OLLAMA_BASE_URL}/api/{config.OLLAMA_API_VERSION}/generate"
+        else:
+            api_url = f"{config.OLLAMA_BASE_URL}/api/generate"
         
         # Prepare request data
         data = {
