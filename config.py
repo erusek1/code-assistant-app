@@ -100,8 +100,4 @@ ANALYSIS_TYPES = [
 
 # External API configuration
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-<<<<<<< HEAD
-OLLAMA_API_VERSION = ""
-=======
 OLLAMA_API_VERSION = ""  # Temporarily empty to try direct /api/generate endpoint
->>>>>>> 1ef12801c1502c45ec62bfba123cc414b40792b0
