@@ -4,6 +4,7 @@ LLM Service - Interface to LLM models
 import json
 import time
 import requests
+import traceback
 import re
 from typing import Dict, List, Any, Optional, Tuple, Union
 
@@ -31,6 +32,42 @@ class LLMService:
         self.total_tokens_used = 0
         self.total_requests = 0
         self.total_time = 0
+        
+        # Test connection to Ollama
+        self.test_ollama_connection()
+    
+    def test_ollama_connection(self):
+        """Test connection to Ollama API."""
+        try:
+            response = requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=5)
+            response.raise_for_status()
+            
+            # Check if our models are available
+            available_models = [model.get("name") for model in response.json().get("models", [])]
+            
+            print(f"Connected to Ollama successfully.")
+            
+            # Check if required models are available
+            analysis_model_base = self.analysis_model.split(':')[0]
+            chat_model_base = self.chat_model.split(':')[0]
+            
+            analysis_model_found = any(model.startswith(analysis_model_base) for model in available_models)
+            chat_model_found = any(model.startswith(chat_model_base) for model in available_models)
+            
+            if not analysis_model_found:
+                print(f"Warning: Analysis model '{self.analysis_model}' not found in Ollama.")
+                print(f"Available models: {', '.join(available_models) if available_models else 'None'}")
+                print(f"Consider running: ollama pull {self.analysis_model}")
+            
+            if not chat_model_found:
+                print(f"Warning: Chat model '{self.chat_model}' not found in Ollama.")
+                print(f"Available models: {', '.join(available_models) if available_models else 'None'}")
+                print(f"Consider running: ollama pull {self.chat_model}")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error connecting to Ollama: {e}")
+            print("Please ensure Ollama is running on your machine.")
+            print(f"Expected Ollama at: {config.OLLAMA_BASE_URL}")
     
     def analyze_code(
         self,
@@ -285,51 +322,101 @@ class LLMService:
         Returns:
             Tuple of (response, tokens used)
         """
-        start_time = time.time()
+        max_retries = 3
+        retry_delay = 2  # seconds
         
-        # Prepare API URL
-        if config.OLLAMA_API_VERSION:
-            api_url = f"{config.OLLAMA_BASE_URL}/api/{config.OLLAMA_API_VERSION}/generate"
-        else:
-            api_url = f"{config.OLLAMA_BASE_URL}/api/generate"
-        
-        # Prepare request data
-        data = {
-            "model": model,
-            "prompt": prompt,
-            "temperature": temperature,
-            "num_predict": max_tokens,
-            "raw": True,
-        }
-        
-        try:
-            # Make API call
-            response = requests.post(api_url, json=data, timeout=config.TIMEOUT_SECONDS)
-            response.raise_for_status()
+        for attempt in range(max_retries):
+            start_time = time.time()
             
-            # Parse response
-            response_data = response.json()
+            try:
+                # Log summary of request (truncate long prompts)
+                prompt_summary = prompt[:100] + "..." if len(prompt) > 100 else prompt
+                print(f"  Calling Ollama with model {model}, prompt: {prompt_summary}")
+                
+                # Prepare API URL
+                if config.OLLAMA_API_VERSION:
+                    api_url = f"{config.OLLAMA_BASE_URL}/api/{config.OLLAMA_API_VERSION}/generate"
+                else:
+                    api_url = f"{config.OLLAMA_BASE_URL}/api/generate"
+                
+                # Prepare request data
+                data = {
+                    "model": model,
+                    "prompt": prompt,
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                    "raw": True,
+                }
+                
+                # Make API call with timeout
+                response = requests.post(
+                    api_url, 
+                    json=data, 
+                    timeout=config.TIMEOUT_SECONDS
+                )
+                response.raise_for_status()
+                
+                # Parse response
+                response_data = response.json()
+                
+                # Extract response text
+                generated_text = response_data.get("response", "")
+                
+                # Get token usage
+                tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
+                
+                # Update statistics
+                self.total_tokens_used += tokens_used
+                self.total_requests += 1
+                self.total_time += time.time() - start_time
+                
+                # Print response summary
+                resp_summary = generated_text[:100] + "..." if len(generated_text) > 100 else generated_text
+                print(f"  Received response ({tokens_used} tokens): {resp_summary}")
+                
+                return generated_text, tokens_used
+                
+            except requests.exceptions.Timeout:
+                print(f"  Warning: Request to Ollama API timed out after {config.TIMEOUT_SECONDS} seconds - Attempt {attempt+1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    print("  Max retries exceeded.")
+                    return f"Request timed out after {max_retries} attempts. Please try again later.", 0
+                
+            except requests.exceptions.RequestException as e:
+                print(f"  Error calling Ollama API: {e} - Attempt {attempt+1}/{max_retries}")
+                traceback.print_exc()
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    print("  Max retries exceeded.")
+                    return f"Error calling LLM API after {max_retries} attempts: {e}", 0
             
-            # Extract response text
-            generated_text = response_data.get("response", "")
+            except json.JSONDecodeError as e:
+                print(f"  Error parsing JSON response: {e} - Attempt {attempt+1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    print("  Max retries exceeded.")
+                    return f"Error parsing LLM response after {max_retries} attempts: {e}", 0
             
-            # Get token usage
-            tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
-            
-            # Update statistics
-            self.total_tokens_used += tokens_used
-            self.total_requests += 1
-            self.total_time += time.time() - start_time
-            
-            return generated_text, tokens_used
-            
-        except requests.exceptions.Timeout:
-            print(f"Error: Request to Ollama API timed out after {config.TIMEOUT_SECONDS} seconds")
-            return "Request timed out. Please try again later.", 0
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Error: {e}")
-            return f"Error calling LLM API: {e}", 0
+            except Exception as e:
+                print(f"  Unexpected error: {e} - Attempt {attempt+1}/{max_retries}")
+                traceback.print_exc()
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    print("  Max retries exceeded.")
+                    return f"Unexpected error after {max_retries} attempts: {e}", 0
     
     def _extract_code_block(self, text: str, language: str) -> Optional[str]:
         """
@@ -343,7 +430,7 @@ class LLMService:
             Code block if found, None otherwise
         """
         # Pattern for code blocks in markdown
-        pattern = r"```(?:" + language + r")?\s*([\s\S]*?)\s*```"
+        pattern = r"```(?:" + language + r")?\\s*([\\s\\S]*?)\\s*```"
         
         # Find all code blocks
         matches = re.findall(pattern, text, re.MULTILINE)
