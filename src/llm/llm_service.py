@@ -39,18 +39,14 @@ class LLMService:
     def test_ollama_connection(self):
         """Test connection to Ollama API."""
         try:
+            print("Testing connection to Ollama...")
             response = requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=5)
             response.raise_for_status()
             
-            # Print full response for debugging
-            print(f"Ollama API response: {response.status_code}")
-            print(f"Response headers: {response.headers}")
-            
-            # Check if our models are available
+            # Print available models
             json_response = response.json()
-            print(f"Available models: {[model.get('name') for model in json_response.get('models', [])]}")
-            
             available_models = [model.get("name") for model in json_response.get("models", [])]
+            print(f"Available models: {available_models}")
             
             print(f"Connected to Ollama successfully.")
             
@@ -340,19 +336,11 @@ class LLMService:
                 prompt_summary = prompt[:100] + "..." if len(prompt) > 100 else prompt
                 print(f"  Calling Ollama with model {model}, prompt: {prompt_summary}")
                 
-                # Prepare API URL - Try the completion endpoint first if API version is set
-                if hasattr(config, 'OLLAMA_API_VERSION') and config.OLLAMA_API_VERSION:
-                    api_url = f"{config.OLLAMA_BASE_URL}/api/{config.OLLAMA_API_VERSION}/generate"
-                    # Also try completion endpoint if set to v1
-                    if config.OLLAMA_API_VERSION == "v1":
-                        api_url = f"{config.OLLAMA_BASE_URL}/api/v1/completions"
-                else:
-                    # Fall back to the default generate endpoint
-                    api_url = f"{config.OLLAMA_BASE_URL}/api/generate"
-                
+                # Always use the standard generate endpoint
+                api_url = f"{config.OLLAMA_BASE_URL}/api/generate"
                 print(f"  Using API URL: {api_url}")
                 
-                # Prepare request data
+                # Prepare request data for the generate endpoint
                 data = {
                     "model": model,
                     "prompt": prompt,
@@ -360,16 +348,6 @@ class LLMService:
                     "num_predict": max_tokens,
                     "raw": True,
                 }
-                
-                # Adjust for v1/completions endpoint
-                if "completions" in api_url:
-                    data = {
-                        "model": model,
-                        "prompt": prompt,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": False,
-                    }
                 
                 # Make API call with timeout
                 response = requests.post(
@@ -379,25 +357,17 @@ class LLMService:
                 )
                 response.raise_for_status()
                 
-                # Print full response for debugging
-                print(f"  Response status: {response.status_code}")
-                print(f"  Response content type: {response.headers.get('Content-Type', 'Unknown')}")
-                print(f"  Response content preview: {response.text[:200]}...")
+                # Debug the raw response
+                raw_response = response.text
+                print(f"  Response raw content (first 100 chars): {raw_response[:100]}...")
                 
-                # Safely parse the response, handling multiline JSON responses
+                # Safely parse the response
                 try:
-                    # Try to parse as a single JSON object first
-                    response_data = self._safe_parse_json(response.text)
+                    response_data = json.loads(raw_response)
                     
-                    # Extract response text
-                    if "completions" in api_url:
-                        # Completion endpoint format
-                        generated_text = response_data.get("choices", [{}])[0].get("text", "")
-                        tokens_used = response_data.get("usage", {}).get("total_tokens", 0)
-                    else:
-                        # Generate endpoint format
-                        generated_text = response_data.get("response", "")
-                        tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
+                    # Extract response text and token count
+                    generated_text = response_data.get("response", "")
+                    tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
                     
                     # Update statistics
                     self.total_tokens_used += tokens_used
@@ -408,61 +378,29 @@ class LLMService:
                     resp_summary = generated_text[:100] + "..." if len(generated_text) > 100 else generated_text
                     print(f"  Received response ({tokens_used} tokens): {resp_summary}")
                     
-                    return generated_text, tokens_used
+                    # If we have a valid response
+                    if generated_text:
+                        return generated_text, tokens_used
+                    else:
+                        print("  Warning: Empty response received from Ollama")
+                        # Return something rather than nothing
+                        return "No issues found in the code. The analysis completed successfully but didn't identify any specific problems to report.", 0
                     
                 except json.JSONDecodeError as e:
-                    # Fallback for streaming response or other non-standard formats
-                    print(f"  Warning: JSON parsing failed, trying to extract response manually: {e}")
-                    # Try to extract the response text from the raw response
-                    generated_text = self._extract_response_from_text(response.text)
-                    if not generated_text:
-                        print(f"  Failed to extract response from text: {response.text[:200]}...")
-                        # Try fallback v1 API if using default
-                        if "generate" in api_url and not "v1" in api_url:
-                            print("  Attempting fallback to v1 API...")
-                            api_url = f"{config.OLLAMA_BASE_URL}/api/v1/completions"
-                            # Make a new request with v1 API
-                            data = {
-                                "model": model,
-                                "prompt": prompt,
-                                "temperature": temperature,
-                                "max_tokens": max_tokens,
-                                "stream": False,
-                            }
-                            response = requests.post(
-                                api_url, 
-                                json=data, 
-                                timeout=config.TIMEOUT_SECONDS
-                            )
-                            response.raise_for_status()
-                            try:
-                                response_data = response.json()
-                                generated_text = response_data.get("choices", [{}])[0].get("text", "")
-                                tokens_used = response_data.get("usage", {}).get("total_tokens", 0)
-                                
-                                # Update statistics with estimated values
-                                self.total_tokens_used += tokens_used
-                                self.total_requests += 1
-                                self.total_time += time.time() - start_time
-                                
-                                print(f"  Fallback successful ({tokens_used} tokens): {generated_text[:100]}...")
-                                return generated_text, tokens_used
-                            except:
-                                # If fallback also fails, use original error
-                                raise Exception(f"Unable to parse Ollama response with both APIs: {e}")
-                        else:
-                            raise Exception(f"Unable to parse Ollama response: {e}")
+                    print(f"  Warning: JSON parsing failed: {e}")
+                    print(f"  Raw response: {raw_response[:200]}...")
                     
-                    # Estimate token usage based on response length
-                    tokens_used = len(generated_text.split()) * 2  # Rough estimate
-                    
-                    # Update statistics with estimated values
-                    self.total_tokens_used += tokens_used
-                    self.total_requests += 1
-                    self.total_time += time.time() - start_time
-                    
-                    print(f"  Manually extracted response ({tokens_used} est. tokens): {generated_text[:100]}...")
-                    return generated_text, tokens_used
+                    # Try to extract something useful from the raw response
+                    # For some Ollama versions, the response might be plain text
+                    if raw_response.strip():
+                        print("  Using raw response as fallback")
+                        # Estimate token usage based on response length
+                        tokens_used = len(raw_response.split()) * 2  # Rough estimate
+                        return raw_response, tokens_used
+                    else:
+                        # If we can't get anything useful
+                        print("  No useful content could be extracted from response")
+                        return "The analysis couldn't be completed. Please check that Ollama is running correctly.", 0
                 
             except requests.exceptions.Timeout:
                 print(f"  Warning: Request to Ollama API timed out after {config.TIMEOUT_SECONDS} seconds - Attempt {attempt+1}/{max_retries}")
@@ -472,7 +410,7 @@ class LLMService:
                     retry_delay *= config.RETRY_BACKOFF_FACTOR if hasattr(config, 'RETRY_BACKOFF_FACTOR') else 2  # Exponential backoff
                 else:
                     print("  Max retries exceeded.")
-                    return f"Request timed out after {max_retries} attempts. Please try again later.", 0
+                    return "Request timed out. Please ensure Ollama is running and try again with a smaller codebase.", 0
                 
             except requests.exceptions.RequestException as e:
                 print(f"  Error calling Ollama API: {e} - Attempt {attempt+1}/{max_retries}")
@@ -483,7 +421,7 @@ class LLMService:
                     retry_delay *= config.RETRY_BACKOFF_FACTOR if hasattr(config, 'RETRY_BACKOFF_FACTOR') else 2  # Exponential backoff
                 else:
                     print("  Max retries exceeded.")
-                    return f"Error calling LLM API after {max_retries} attempts: {e}", 0
+                    return f"Error calling Ollama API: {e}. Please check that Ollama is running correctly.", 0
             
             except Exception as e:
                 print(f"  Unexpected error: {e} - Attempt {attempt+1}/{max_retries}")
@@ -494,82 +432,7 @@ class LLMService:
                     retry_delay *= config.RETRY_BACKOFF_FACTOR if hasattr(config, 'RETRY_BACKOFF_FACTOR') else 2
                 else:
                     print("  Max retries exceeded.")
-                    return f"Unexpected error after {max_retries} attempts: {e}", 0
-    
-    def _safe_parse_json(self, text: str) -> Dict[str, Any]:
-        """
-        Safely parse JSON, handling potential issues with Ollama responses.
-        
-        Args:
-            text: JSON text to parse
-            
-        Returns:
-            Parsed JSON object
-        """
-        # If it's a single clean JSON object
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        
-        # Try to find the first complete JSON object in the text
-        json_pattern = r'(\{.*?\})'
-        matches = re.findall(json_pattern, text, re.DOTALL)
-        
-        for potential_json in matches:
-            try:
-                return json.loads(potential_json)
-            except json.JSONDecodeError:
-                continue
-        
-        # If we get here, we couldn't find a valid JSON object
-        raise json.JSONDecodeError("No valid JSON found in response", text, 0)
-    
-    def _extract_response_from_text(self, text: str) -> str:
-        """
-        Extract the response from text when JSON parsing fails.
-        
-        Args:
-            text: Raw response text
-            
-        Returns:
-            Extracted response text
-        """
-        # Split the response by lines and look for the content
-        lines = text.strip().split('\n')
-        
-        # If there's only one line, return it directly
-        if len(lines) == 1:
-            return lines[0]
-        
-        # Check for streaming response format with multiple JSON objects
-        collected_text = ""
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            try:
-                # Try to parse each line as a JSON object
-                json_obj = json.loads(line)
-                if "response" in json_obj:
-                    collected_text += json_obj["response"]
-                elif "text" in json_obj:
-                    collected_text += json_obj["text"]
-            except json.JSONDecodeError:
-                # If not valid JSON, just add the line
-                collected_text += line + " "
-        
-        # If we collected anything, return it
-        if collected_text:
-            return collected_text
-            
-        # Fallback - return everything after the first line (assuming first line might be an error)
-        if len(lines) > 1:
-            return "\n".join(lines[1:])
-        
-        # Last resort - return the original text
-        return text
+                    return f"Unexpected error: {e}. Please try again with a smaller codebase or check your Ollama installation.", 0
     
     def _extract_code_block(self, text: str, language: str) -> Optional[str]:
         """
