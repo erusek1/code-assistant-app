@@ -9,3 +9,6 @@ tqdm>=4.64.0
 
 # Path handling
 pathlib>=1.0.1
+
+# Encoding detection
+chardet>=5.0.0
