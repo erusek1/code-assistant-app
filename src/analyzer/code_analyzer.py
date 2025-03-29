@@ -4,6 +4,7 @@ Code Analyzer - Analyzes code and identifies issues
 import os
 import re
 import time
+import traceback
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -35,6 +36,7 @@ class CodeAnalyzer:
         self.files_analyzed = 0
         self.start_time = None
         self.total_tokens = 0
+        self.failed_files = 0
     
     def analyze_directory(self, directory_path: Path) -> Dict[str, Any]:
         """
@@ -48,11 +50,19 @@ class CodeAnalyzer:
         """
         self.issue_count = 0
         self.files_analyzed = 0
+        self.failed_files = 0
         self.start_time = time.time()
         self.total_tokens = 0
         
         # Get all files to analyze
-        files = self.file_service.get_code_files(directory_path)
+        print(f"Scanning directory: {directory_path}")
+        try:
+            files = self.file_service.get_code_files(directory_path)
+            print(f"Found {len(files)} code files to analyze")
+        except Exception as e:
+            print(f"Error scanning directory: {e}")
+            traceback.print_exc()
+            return {"error": f"Error scanning directory: {e}"}
         
         if not files:
             print(f"No files to analyze in {directory_path}")
@@ -62,7 +72,7 @@ class CodeAnalyzer:
         results = {
             "project_name": directory_path.name,
             "analysis_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "files_analyzed": len(files),
+            "files_analyzed": 0,  # We'll update this as we go
             "total_issues": 0,
             "file_analyses": {},
             "project_level_analysis": None,
@@ -71,73 +81,113 @@ class CodeAnalyzer:
         }
         
         # Analyze each file
-        print(f"Analyzing {len(files)} files...")
+        print(f"Starting analysis of {len(files)} files...")
         
         for i, file_path in enumerate(files):
-            print(f"[{i+1}/{len(files)}] Analyzing {file_path.relative_to(directory_path)}")
-            
-            # Get file content and language
-            content, language = self.file_service.get_file_content(file_path)
-            
-            if not content or not language:
+            try:
+                # Calculate relative path for display
+                try:
+                    rel_path = file_path.relative_to(directory_path)
+                except ValueError:
+                    rel_path = file_path
+                
+                print(f"[{i+1}/{len(files)}] Analyzing {rel_path}")
+                
+                # Get file content and language
+                content, language = self.file_service.get_file_content(file_path)
+                
+                if not content:
+                    print(f"  Warning: Could not read content from {file_path.name}")
+                    self.failed_files += 1
+                    continue
+                    
+                if not language:
+                    print(f"  Warning: Could not determine language for {file_path.name}")
+                    self.failed_files += 1
+                    continue
+                    
+                # Check if we have an existing analysis for this file
+                existing_analysis = self.project_context.get_file_analysis(str(file_path))
+                file_modified = self.file_service.is_file_modified(file_path, existing_analysis)
+                
+                # If file hasn't been modified, use existing analysis
+                if existing_analysis and not file_modified:
+                    print(f"  Using existing analysis for {file_path.name}")
+                    file_analysis = existing_analysis
+                    issue_count = self._count_issues(file_analysis)
+                else:
+                    # Perform analysis
+                    print(f"  Performing new analysis for {file_path.name} ({len(content.splitlines())} lines)")
+                    file_analysis = self._analyze_file(file_path, content, language)
+                    issue_count = self._count_issues(file_analysis)
+                    
+                    # Update project context with new analysis
+                    self.project_context.update_file_analysis(str(file_path), file_analysis)
+                
+                # Update statistics
+                self.issue_count += issue_count
+                self.files_analyzed += 1
+                
+                # Add to results
+                results["file_analyses"][str(file_path)] = file_analysis
+                
+                # Show progress
+                print(f"  Found {issue_count} issues in {file_path.name}")
+                
+            except Exception as e:
+                print(f"Error analyzing {file_path}: {e}")
+                traceback.print_exc()
+                self.failed_files += 1
                 continue
-                
-            # Check if we have an existing analysis for this file
-            existing_analysis = self.project_context.get_file_analysis(str(file_path))
-            file_modified = self.file_service.is_file_modified(file_path, existing_analysis)
-            
-            # If file hasn't been modified, use existing analysis
-            if existing_analysis and not file_modified:
-                print(f"  Using existing analysis for {file_path.name}")
-                file_analysis = existing_analysis
-                issue_count = self._count_issues(file_analysis)
-            else:
-                # Perform analysis
-                file_analysis = self._analyze_file(file_path, content, language)
-                issue_count = self._count_issues(file_analysis)
-                
-                # Update project context with new analysis
-                self.project_context.update_file_analysis(str(file_path), file_analysis)
-            
-            # Update statistics
-            self.issue_count += issue_count
-            self.files_analyzed += 1
-            
-            # Add to results
-            results["file_analyses"][str(file_path)] = file_analysis
         
-        # Update total issues
+        # Update result counts
+        results["files_analyzed"] = self.files_analyzed
         results["total_issues"] = self.issue_count
         
-        # Generate project-level analysis
-        print("Generating project-level analysis...")
-        project_analysis = self._generate_project_analysis(directory_path, results["file_analyses"])
-        results["project_level_analysis"] = project_analysis
-        
-        # Generate growth recommendations
-        print("Generating growth recommendations...")
-        growth_recs = self._generate_growth_recommendations(directory_path, results["file_analyses"])
-        results["growth_recommendations"] = growth_recs
-        
-        # Generate security overview
-        print("Generating security overview...")
-        security_overview = self._generate_security_overview(directory_path, results["file_analyses"])
-        results["security_overview"] = security_overview
+        # Generate project-level analysis only if we have files analyzed
+        if self.files_analyzed > 0:
+            try:
+                print("Generating project-level analysis...")
+                project_analysis = self._generate_project_analysis(directory_path, results["file_analyses"])
+                results["project_level_analysis"] = project_analysis
+                
+                print("Generating growth recommendations...")
+                growth_recs = self._generate_growth_recommendations(directory_path, results["file_analyses"])
+                results["growth_recommendations"] = growth_recs
+                
+                print("Generating security overview...")
+                security_overview = self._generate_security_overview(directory_path, results["file_analyses"])
+                results["security_overview"] = security_overview
+            except Exception as e:
+                print(f"Error generating project reports: {e}")
+                traceback.print_exc()
+        else:
+            print("No files were successfully analyzed. Skipping project-level reports.")
+            results["project_level_analysis"] = "No files were successfully analyzed."
+            results["growth_recommendations"] = []
+            results["security_overview"] = "No files were successfully analyzed."
         
         # Add execution statistics
         execution_time = time.time() - self.start_time
         results["execution_time"] = execution_time
-        results["average_time_per_file"] = execution_time / len(files) if files else 0
+        results["average_time_per_file"] = execution_time / self.files_analyzed if self.files_analyzed else 0
         results["total_tokens"] = self.total_tokens
+        results["failed_files"] = self.failed_files
         
         # Store analysis in the analysis store
-        self.analysis_store.store_analysis(
-            project_name=directory_path.name,
-            results=results
-        )
+        try:
+            self.analysis_store.store_analysis(
+                project_name=directory_path.name,
+                results=results
+            )
+        except Exception as e:
+            print(f"Error storing analysis: {e}")
+            traceback.print_exc()
         
         print(f"Analysis complete in {execution_time:.2f} seconds.")
         print(f"Found {self.issue_count} issues across {self.files_analyzed} files.")
+        if self.failed_files > 0:
+            print(f"Failed to analyze {self.failed_files} files.")
         
         return results
     
@@ -157,34 +207,47 @@ class CodeAnalyzer:
         file_info = self.file_service.get_file_info(file_path)
         
         # Perform standard analysis
-        analysis_result, tokens_used = self.llm_service.analyze_code(
-            code=content,
-            language=language,
-            file_path=str(file_path),
-            analysis_type="standard"
-        )
+        try:
+            analysis_result, tokens_used = self.llm_service.analyze_code(
+                code=content,
+                language=language,
+                file_path=str(file_path),
+                analysis_type="standard"
+            )
+        except Exception as e:
+            print(f"  Error during standard analysis: {e}")
+            analysis_result = f"Error during analysis: {e}"
+            tokens_used = 0
         
         # Perform security analysis if file is complex enough
         security_analysis = None
         if len(content.splitlines()) > 20:  # Only for substantial files
-            security_analysis, sec_tokens = self.llm_service.analyze_code(
-                code=content,
-                language=language,
-                file_path=str(file_path),
-                analysis_type="security"
-            )
-            tokens_used += sec_tokens
+            try:
+                security_analysis, sec_tokens = self.llm_service.analyze_code(
+                    code=content,
+                    language=language,
+                    file_path=str(file_path),
+                    analysis_type="security"
+                )
+                tokens_used += sec_tokens
+            except Exception as e:
+                print(f"  Error during security analysis: {e}")
+                security_analysis = None
         
         # Perform performance analysis if file is complex enough
         performance_analysis = None
         if len(content.splitlines()) > 50:  # Only for very substantial files
-            performance_analysis, perf_tokens = self.llm_service.analyze_code(
-                code=content,
-                language=language,
-                file_path=str(file_path),
-                analysis_type="performance"
-            )
-            tokens_used += perf_tokens
+            try:
+                performance_analysis, perf_tokens = self.llm_service.analyze_code(
+                    code=content,
+                    language=language,
+                    file_path=str(file_path),
+                    analysis_type="performance"
+                )
+                tokens_used += perf_tokens
+            except Exception as e:
+                print(f"  Error during performance analysis: {e}")
+                performance_analysis = None
         
         # Update token count
         self.total_tokens += tokens_used
@@ -338,18 +401,20 @@ class CodeAnalyzer:
         top_issues = sorted(issue_frequencies.items(), key=lambda x: x[1], reverse=True)[:10]
         
         # Generate the analysis with the LLM
-        project_analysis, tokens = self.llm_service.generate_project_analysis(
-            project_name=directory_path.name,
-            project_structure=project_structure,
-            file_count=file_count,
-            issue_count=issue_count,
-            top_issues=top_issues,
-            file_analyses=file_analyses
-        )
-        
-        self.total_tokens += tokens
-        
-        return project_analysis
+        try:
+            project_analysis, tokens = self.llm_service.generate_project_analysis(
+                project_name=directory_path.name,
+                project_structure=project_structure,
+                file_count=file_count,
+                issue_count=issue_count,
+                top_issues=top_issues,
+                file_analyses=file_analyses
+            )
+            self.total_tokens += tokens
+            return project_analysis
+        except Exception as e:
+            print(f"Error generating project analysis: {e}")
+            return f"Error generating project analysis: {e}"
     
     def _generate_growth_recommendations(
         self,
@@ -370,36 +435,40 @@ class CodeAnalyzer:
         project_structure = self.file_service.get_project_structure(directory_path)
         
         # Generate growth recommendations with the LLM
-        growth_recommendations_text, tokens = self.llm_service.generate_growth_recommendations(
-            project_name=directory_path.name,
-            project_structure=project_structure,
-            file_analyses=file_analyses
-        )
-        
-        self.total_tokens += tokens
-        
-        # Parse recommendations into a structured format
-        recommendations = []
-        
-        # Split by sections or numbered recommendations
-        sections = re.split(r"\n\s*\d+\.\s+", growth_recommendations_text)
-        if len(sections) > 1:
-            # Remove the intro text before the numbered list
-            sections = [sections[0]] + ["{}. {}".format(i, section) for i, section in enumerate(sections[1:], 1)]
-        
-        for section in sections[1:] if len(sections) > 1 else [growth_recommendations_text]:
-            # Extract title and description
-            lines = section.strip().split("\n")
-            title = lines[0].strip()
-            description = "\n".join(lines[1:]).strip()
+        try:
+            growth_recommendations_text, tokens = self.llm_service.generate_growth_recommendations(
+                project_name=directory_path.name,
+                project_structure=project_structure,
+                file_analyses=file_analyses
+            )
             
-            recommendations.append({
-                "title": title,
-                "description": description,
-                "implemented": False,
-            })
-        
-        return recommendations
+            self.total_tokens += tokens
+            
+            # Parse recommendations into a structured format
+            recommendations = []
+            
+            # Split by sections or numbered recommendations
+            sections = re.split(r"\n\s*\d+\.\s+", growth_recommendations_text)
+            if len(sections) > 1:
+                # Remove the intro text before the numbered list
+                sections = [sections[0]] + [f"{i}. {section}" for i, section in enumerate(sections[1:], 1)]
+            
+            for section in sections[1:] if len(sections) > 1 else [growth_recommendations_text]:
+                # Extract title and description
+                lines = section.strip().split("\n")
+                title = lines[0].strip()
+                description = "\n".join(lines[1:]).strip()
+                
+                recommendations.append({
+                    "title": title,
+                    "description": description,
+                    "implemented": False,
+                })
+            
+            return recommendations
+        except Exception as e:
+            print(f"Error generating growth recommendations: {e}")
+            return []
     
     def _generate_security_overview(
         self,
@@ -439,12 +508,16 @@ class CodeAnalyzer:
                             security_issues.append(security_issue)
         
         # Generate security overview with the LLM
-        security_overview, tokens = self.llm_service.generate_security_overview(
-            project_name=directory_path.name,
-            security_issues=security_issues,
-            file_analyses=file_analyses
-        )
-        
-        self.total_tokens += tokens
-        
-        return security_overview
+        try:
+            security_overview, tokens = self.llm_service.generate_security_overview(
+                project_name=directory_path.name,
+                security_issues=security_issues,
+                file_analyses=file_analyses
+            )
+            
+            self.total_tokens += tokens
+            
+            return security_overview
+        except Exception as e:
+            print(f"Error generating security overview: {e}")
+            return f"Error generating security overview: {e}"
