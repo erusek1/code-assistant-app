@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
 """
 File Service - Handles file system operations
 """
 import os
 import json
 import fnmatch
+import chardet
+import traceback
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional, Set
 
@@ -27,22 +28,26 @@ class FileService:
         """
         files = []
         
-        for root, _, filenames in os.walk(directory):
-            # Skip excluded directories
-            if any(fnmatch.fnmatch(root, pattern) for pattern in config.EXCLUDE_PATTERNS):
-                continue
-                
-            # Check each file
-            for filename in filenames:
-                file_path = Path(os.path.join(root, filename))
-                
-                # Skip excluded files
-                if any(fnmatch.fnmatch(str(file_path), pattern) for pattern in config.EXCLUDE_PATTERNS):
+        try:
+            for root, _, filenames in os.walk(directory):
+                # Skip excluded directories
+                if any(fnmatch.fnmatch(root, pattern) for pattern in config.EXCLUDE_PATTERNS):
                     continue
-                
-                # Check if file extension is supported
-                if file_path.suffix.lower() in config.CODE_EXTENSIONS:
-                    files.append(file_path)
+                    
+                # Check each file
+                for filename in filenames:
+                    file_path = Path(os.path.join(root, filename))
+                    
+                    # Skip excluded files
+                    if any(fnmatch.fnmatch(str(file_path), pattern) for pattern in config.EXCLUDE_PATTERNS):
+                        continue
+                    
+                    # Check if file extension is supported
+                    if file_path.suffix.lower() in config.CODE_EXTENSIONS:
+                        files.append(file_path)
+        except Exception as e:
+            print(f"Error scanning directory {directory}: {e}")
+            traceback.print_exc()
         
         return files
     
@@ -69,44 +74,70 @@ class FileService:
             
         language = config.CODE_EXTENSIONS[extension]
         
-        # Special handling based on file type
+        # Try different approaches to read the file based on type
         try:
-            # JSON files - validate structure
+            # Special handling for JSON files
             if extension == '.json':
                 try:
-                    # Try to parse JSON to validate it, then read raw content
+                    # First try to read and validate JSON
                     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        json.load(f)
-                    
-                    # If successful, read file as text
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
-                    
-                    return content, language
-                except json.JSONDecodeError as e:
-                    print(f"Note: JSON parsing error in '{file_path}': {e}")
-                    # Still return the content so we can analyze the invalid JSON
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
-                    return content, language
+                        # Try to parse as JSON
+                        try:
+                            json_data = json.load(f)
+                            # If successful, read the file again as text
+                            with open(file_path, "r", encoding="utf-8", errors="replace") as f2:
+                                return f2.read(), language
+                        except json.JSONDecodeError as je:
+                            print(f"Warning: JSON parsing error in '{file_path}': {je}")
+                            # Return the raw content for analysis
+                            with open(file_path, "r", encoding="utf-8", errors="replace") as f2:
+                                return f2.read(), language
+                except Exception as e:
+                    print(f"Error reading JSON file '{file_path}': {e}")
+                    # Fall through to binary approach
             
-            # Regular files - just read as text
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            # Try standard text reading first
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                    return content, language
+            except UnicodeDecodeError:
+                # If UTF-8 fails, detect encoding and try again
+                print(f"  Unicode error with {file_path}, attempting to detect encoding...")
+                
+                # Read file in binary mode to detect encoding
+                with open(file_path, "rb") as f:
+                    raw_data = f.read()
+                    
+                # Detect encoding
+                result = chardet.detect(raw_data)
+                encoding = result.get("encoding", "utf-8")
+                confidence = result.get("confidence", 0)
+                
+                print(f"  Detected encoding: {encoding} with {confidence:.2f} confidence")
+                
+                # Try with detected encoding if confidence is high enough
+                if confidence > 0.7:
+                    with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                        content = f.read()
+                        return content, language
+                
+                # Otherwise, force utf-8 with error replacement
+                content = raw_data.decode("utf-8", errors="replace")
                 return content, language
+                
         except Exception as e:
-            # Handle any other errors
             print(f"Error reading file '{file_path}': {e}")
+            traceback.print_exc()
             
-            # Try binary mode as fallback for troublesome files
+            # Last resort: try to read as binary and force to utf-8
             try:
                 with open(file_path, "rb") as f:
-                    binary_content = f.read()
-                    # Convert binary to string with explicit error handling
-                    content = binary_content.decode("utf-8", errors="replace")
+                    raw_data = f.read()
+                    content = raw_data.decode("utf-8", errors="replace")
                     return content, language
             except Exception as e2:
-                print(f"Binary fallback also failed for '{file_path}': {e2}")
+                print(f"Failed all reading attempts for '{file_path}': {e2}")
                 return None, None
     
     def get_file_info(self, file_path: Path) -> Dict[str, Any]:
