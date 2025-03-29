@@ -430,7 +430,7 @@ class LLMService:
             Code block if found, None otherwise
         """
         # Pattern for code blocks in markdown
-        pattern = r"```(?:" + language + r")?\\s*([\\s\\S]*?)\\s*```"
+        pattern = r"```(?:" + language + r")?\s*([\s\S]*?)\s*```"
         
         # Find all code blocks
         matches = re.findall(pattern, text, re.MULTILINE)
