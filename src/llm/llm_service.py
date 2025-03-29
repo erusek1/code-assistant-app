@@ -42,8 +42,15 @@ class LLMService:
             response = requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=5)
             response.raise_for_status()
             
+            # Print full response for debugging
+            print(f"Ollama API response: {response.status_code}")
+            print(f"Response headers: {response.headers}")
+            
             # Check if our models are available
-            available_models = [model.get("name") for model in response.json().get("models", [])]
+            json_response = response.json()
+            print(f"Available models: {[model.get('name') for model in json_response.get('models', [])]}")
+            
+            available_models = [model.get("name") for model in json_response.get("models", [])]
             
             print(f"Connected to Ollama successfully.")
             
@@ -322,8 +329,8 @@ class LLMService:
         Returns:
             Tuple of (response, tokens used)
         """
-        max_retries = 3
-        retry_delay = 2  # seconds
+        max_retries = config.MAX_RETRIES if hasattr(config, 'MAX_RETRIES') else 3
+        retry_delay = config.INITIAL_RETRY_DELAY if hasattr(config, 'INITIAL_RETRY_DELAY') else 2  # seconds
         
         for attempt in range(max_retries):
             start_time = time.time()
@@ -333,11 +340,17 @@ class LLMService:
                 prompt_summary = prompt[:100] + "..." if len(prompt) > 100 else prompt
                 print(f"  Calling Ollama with model {model}, prompt: {prompt_summary}")
                 
-                # Prepare API URL
-                if config.OLLAMA_API_VERSION:
+                # Prepare API URL - Try the completion endpoint first if API version is set
+                if hasattr(config, 'OLLAMA_API_VERSION') and config.OLLAMA_API_VERSION:
                     api_url = f"{config.OLLAMA_BASE_URL}/api/{config.OLLAMA_API_VERSION}/generate"
+                    # Also try completion endpoint if set to v1
+                    if config.OLLAMA_API_VERSION == "v1":
+                        api_url = f"{config.OLLAMA_BASE_URL}/api/v1/completions"
                 else:
+                    # Fall back to the default generate endpoint
                     api_url = f"{config.OLLAMA_BASE_URL}/api/generate"
+                
+                print(f"  Using API URL: {api_url}")
                 
                 # Prepare request data
                 data = {
@@ -348,6 +361,16 @@ class LLMService:
                     "raw": True,
                 }
                 
+                # Adjust for v1/completions endpoint
+                if "completions" in api_url:
+                    data = {
+                        "model": model,
+                        "prompt": prompt,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    }
+                
                 # Make API call with timeout
                 response = requests.post(
                     api_url, 
@@ -356,16 +379,25 @@ class LLMService:
                 )
                 response.raise_for_status()
                 
+                # Print full response for debugging
+                print(f"  Response status: {response.status_code}")
+                print(f"  Response content type: {response.headers.get('Content-Type', 'Unknown')}")
+                print(f"  Response content preview: {response.text[:200]}...")
+                
                 # Safely parse the response, handling multiline JSON responses
                 try:
                     # Try to parse as a single JSON object first
                     response_data = self._safe_parse_json(response.text)
                     
                     # Extract response text
-                    generated_text = response_data.get("response", "")
-                    
-                    # Get token usage
-                    tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
+                    if "completions" in api_url:
+                        # Completion endpoint format
+                        generated_text = response_data.get("choices", [{}])[0].get("text", "")
+                        tokens_used = response_data.get("usage", {}).get("total_tokens", 0)
+                    else:
+                        # Generate endpoint format
+                        generated_text = response_data.get("response", "")
+                        tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
                     
                     # Update statistics
                     self.total_tokens_used += tokens_used
@@ -385,7 +417,41 @@ class LLMService:
                     generated_text = self._extract_response_from_text(response.text)
                     if not generated_text:
                         print(f"  Failed to extract response from text: {response.text[:200]}...")
-                        raise Exception(f"Unable to parse Ollama response: {e}")
+                        # Try fallback v1 API if using default
+                        if "generate" in api_url and not "v1" in api_url:
+                            print("  Attempting fallback to v1 API...")
+                            api_url = f"{config.OLLAMA_BASE_URL}/api/v1/completions"
+                            # Make a new request with v1 API
+                            data = {
+                                "model": model,
+                                "prompt": prompt,
+                                "temperature": temperature,
+                                "max_tokens": max_tokens,
+                                "stream": False,
+                            }
+                            response = requests.post(
+                                api_url, 
+                                json=data, 
+                                timeout=config.TIMEOUT_SECONDS
+                            )
+                            response.raise_for_status()
+                            try:
+                                response_data = response.json()
+                                generated_text = response_data.get("choices", [{}])[0].get("text", "")
+                                tokens_used = response_data.get("usage", {}).get("total_tokens", 0)
+                                
+                                # Update statistics with estimated values
+                                self.total_tokens_used += tokens_used
+                                self.total_requests += 1
+                                self.total_time += time.time() - start_time
+                                
+                                print(f"  Fallback successful ({tokens_used} tokens): {generated_text[:100]}...")
+                                return generated_text, tokens_used
+                            except:
+                                # If fallback also fails, use original error
+                                raise Exception(f"Unable to parse Ollama response with both APIs: {e}")
+                        else:
+                            raise Exception(f"Unable to parse Ollama response: {e}")
                     
                     # Estimate token usage based on response length
                     tokens_used = len(generated_text.split()) * 2  # Rough estimate
@@ -403,7 +469,7 @@ class LLMService:
                 if attempt < max_retries - 1:
                     print(f"  Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= config.RETRY_BACKOFF_FACTOR if hasattr(config, 'RETRY_BACKOFF_FACTOR') else 2  # Exponential backoff
                 else:
                     print("  Max retries exceeded.")
                     return f"Request timed out after {max_retries} attempts. Please try again later.", 0
@@ -414,7 +480,7 @@ class LLMService:
                 if attempt < max_retries - 1:
                     print(f"  Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= config.RETRY_BACKOFF_FACTOR if hasattr(config, 'RETRY_BACKOFF_FACTOR') else 2  # Exponential backoff
                 else:
                     print("  Max retries exceeded.")
                     return f"Error calling LLM API after {max_retries} attempts: {e}", 0
@@ -425,7 +491,7 @@ class LLMService:
                 if attempt < max_retries - 1:
                     print(f"  Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay *= config.RETRY_BACKOFF_FACTOR if hasattr(config, 'RETRY_BACKOFF_FACTOR') else 2
                 else:
                     print("  Max retries exceeded.")
                     return f"Unexpected error after {max_retries} attempts: {e}", 0
@@ -488,6 +554,8 @@ class LLMService:
                 json_obj = json.loads(line)
                 if "response" in json_obj:
                     collected_text += json_obj["response"]
+                elif "text" in json_obj:
+                    collected_text += json_obj["text"]
             except json.JSONDecodeError:
                 # If not valid JSON, just add the line
                 collected_text += line + " "
