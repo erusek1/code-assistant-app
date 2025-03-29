@@ -3,6 +3,7 @@
 File Service - Handles file system operations
 """
 import os
+import json
 import fnmatch
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional, Set
@@ -68,14 +69,40 @@ class FileService:
             
         language = config.CODE_EXTENSIONS[extension]
         
-        # Read file content
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+        # Special handling for JSON files
+        if extension == '.json':
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    # Parse the JSON to validate it, but return the raw text
+                    data = json.load(f)
+                
+                # Re-read the file as text
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                
                 return content, language
-        except Exception as e:
-            print(f"Error reading file '{file_path}': {e}")
-            return None, None
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON file '{file_path}': {e}")
+                # Still return the content so we can analyze the invalid JSON
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    return content, language
+                except Exception as e:
+                    print(f"Error reading file '{file_path}': {e}")
+                    return None, None
+            except Exception as e:
+                print(f"Error reading file '{file_path}': {e}")
+                return None, None
+        else:
+            # Regular file handling for non-JSON files
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                    return content, language
+            except Exception as e:
+                print(f"Error reading file '{file_path}': {e}")
+                return None, None
     
     def get_file_info(self, file_path: Path) -> Dict[str, Any]:
         """
