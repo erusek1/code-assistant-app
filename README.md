@@ -1,107 +1,103 @@
-# Code Assistant
+# Code Assistant App
 
 A comprehensive tool for analyzing, fixing, and creating code projects locally using LLM models through Ollama.
 
 ## Features
 
-- **Code Analysis**: Thoroughly analyze code files and directories to identify issues, security flaws, performance bottlenecks, and growth opportunities
-- **Issue Resolution**: Automatically fix identified issues with accurate, context-aware solutions
-- **Growth Planning**: Receive enterprise-level recommendations for scaling your codebase
-- **Memory System**: Stores analyses to understand entire programs and track changes over time
-- **Multi-Model Support**: Uses specialized LLMs for different tasks (CodeLlama for analysis, DeepSeek for chat)
+- **Code Analysis**: Scan entire project directories for coding issues, bugs, and improvements
+- **Code Fixing**: Automatically fix identified issues with LLM-powered solutions
+- **Project Creation**: Create new projects from scratch based on detailed requirements
+- **Chat Interface**: Discuss issues, improvements, or new features with an AI assistant
+- **Local Operation**: All processing happens locally on your machine via Ollama
 
-## Requirements
+## Getting Started
 
-- Python 3.8+
-- [Ollama](https://ollama.ai/) installed and running locally
-- Required LLM models:
-  - `codellama:34b` for code analysis and fixes
-  - `deepseek-coder:33b` for chat interface
+### Prerequisites
 
-## Installation
+- Python 3.8 or higher
+- [Ollama](https://ollama.ai/) installed and running on your machine
+- CodeLlama 34b model for code analysis (`ollama pull codellama:34b`)
+- DeepSeek Coder 33b model for chat interface (`ollama pull deepseek-coder:33b`)
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/your-username/code-assistant.git
-   cd code-assistant
-   ```
+### Installation
 
-2. Create a virtual environment and install dependencies:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+1. Clone this repository
+2. Install dependencies with `pip install -r requirements.txt`
+3. Ensure Ollama is running with the required models
 
-3. Ensure Ollama is running with the required models:
-   ```bash
-   ollama pull codellama:34b
-   ollama pull deepseek-coder:33b
-   ```
+### Usage
 
-## Usage
-
-### Analyzing Code
-
-To analyze a directory of code:
+#### Analyzing Code
 
 ```bash
-python main.py analyze /path/to/your/project
+python main.py analyze /path/to/project
 ```
 
-This will create a detailed analysis report highlighting issues, security concerns, and growth opportunities.
+The analysis will scan all code files in the project, identify issues, and generate a comprehensive report.
 
-Options:
-- `--fresh`: Perform a fresh analysis without using previous context
-- `--output`: Specify path to save the analysis report (default: analysis_report.md)
-
-### Fixing Issues
-
-After running an analysis, you can fix the identified issues:
+#### Fixing Issues
 
 ```bash
-python main.py fix /path/to/your/project
+python main.py fix /path/to/project --analysis analysis_report.md
 ```
 
-This will generate fixed versions of your files based on the issues found in the analysis.
+This will fix issues identified in the analysis report and save the fixed files to a directory.
 
-Options:
-- `--analysis`: Path to the analysis file to use (default: analysis_report.md)
-- `--output-dir`: Directory to save fixed files (default: fixed_files)
-
-### Listing Analyses
-
-To see all previous analyses:
+#### Listing Past Analyses
 
 ```bash
 python main.py list
 ```
 
-## Architecture
+View a list of all past analyses stored in the system.
 
-The code assistant is built with a modular architecture:
+## How It Works
 
-- **Analyzer**: Responsible for analyzing code and identifying issues
-- **Fixer**: Implements fixes based on analysis results
-- **Memory**: Stores analysis results and project context for better understanding
-- **LLM Service**: Interface to LLM models through Ollama
-- **Utils**: File operations, reporting, and other utilities
+1. The code analyzer scans your project files, identifying potential issues using the CodeLlama model.
+2. It generates a detailed report with issues categorized by file, with line numbers and descriptions.
+3. The code fixer can then apply intelligent fixes to these issues, creating corrected versions of your files.
+4. All analyses are stored locally for future reference and comparison.
 
 ## Configuration
 
-You can customize the behavior of the code assistant by editing the `config.py` file:
+Key settings can be adjusted in `config.py`:
 
-- Change LLM models
-- Adjust analysis settings
-- Modify file extensions to analyze
-- Set exclude patterns for files/directories to skip
-- Configure timeout and token limits
-- Specify minimum issues to find
+- `ANALYSIS_MODEL`: Model to use for code analysis
+- `CHAT_MODEL`: Model to use for chat interface
+- `ANALYSIS_TEMPERATURE`: Temperature setting for analysis (higher = more creative/critical)
+- `FIX_TEMPERATURE`: Temperature setting for fixes (lower = more conservative fixes)
+- `CODE_EXTENSIONS`: File extensions to analyze
+
+## Project Structure
+
+```
+├── config.py                  # Configuration settings
+├── main.py                    # Main entry point
+├── src/
+│   ├── analyzer/             # Code analysis components
+│   ├── fixer/                # Code fixing components
+│   ├── llm/                  # LLM interaction components
+│   ├── memory/               # Session memory components
+│   └── utils/                # Utility functions
+└── data/                      # Data storage directory
+```
+
+## Improvements and Features
+
+### Recently Added
+
+- Specialized analysis types (security, performance, growth)
+- Issue counting and tracking
+- Enhanced critical analysis with higher temperature
+- Detailed project-level summaries with issue counts
+
+### Coming Soon
+
+- Interactive chat interface for code discussions
+- Project creation wizard
+- Integration with static analysis tools
+- Diff-based analysis and fixes
 
 ## License
 
-[MIT License](LICENSE)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+This project is licensed under the MIT License.

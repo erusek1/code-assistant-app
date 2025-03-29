@@ -1,11 +1,10 @@
+#!/usr/bin/env python3
 """
-Code Fixer - Implements fixes for issues identified in code analysis
+Code Fixer - Fixes issues found by the Code Analyzer
 """
 import re
-import json
-import os
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Set, Optional
 
 from src.llm.llm_service import LLMService
 from src.utils.file_service import FileService
@@ -27,247 +26,157 @@ class CodeFixer:
         self.llm_service = llm_service
         self.project_context = project_context
         
-        # Stats
-        self.fixes_applied = 0
+        # Statistics
         self.files_fixed = 0
+        self.issues_fixed = 0
+        self.total_tokens = 0
     
     def fix_from_analysis(self, analysis_report: str, project_path: Path) -> Dict[str, str]:
         """
-        Fix issues based on analysis report.
+        Fix issues based on an analysis report.
         
         Args:
-            analysis_report: Analysis report content
+            analysis_report: Content of the analysis report
             project_path: Path to the project directory
             
         Returns:
             Dictionary mapping file paths to fixed content
         """
-        # Reset stats
-        self.fixes_applied = 0
-        self.files_fixed = 0
-        
-        # Extract file analyses from report
-        file_analyses = self._extract_file_analyses(analysis_report)
-        
-        # Dictionary to store fixed files
-        fixed_files = {}
+        # Extract file paths and issues from the report
+        file_issues = self._extract_file_issues(analysis_report)
         
         # Fix each file
-        for file_path_str, issues in file_analyses.items():
-            file_path = Path(file_path_str)
-            
-            # Skip if file doesn't exist
-            if not file_path.exists():
-                print(f"Warning: File {file_path} does not exist, skipping.")
+        fixed_files = {}
+        
+        for file_path, issues in file_issues.items():
+            abs_path = project_path / file_path
+            if not abs_path.exists():
+                print(f"Warning: File '{file_path}' does not exist, skipping")
                 continue
+                
+            print(f"Fixing file: {file_path} ({len(issues)} issues)")
             
             # Get file content and language
-            content, language = self.file_service.get_file_content(file_path)
+            content, language = self.file_service.get_file_content(abs_path)
             
             if not content or not language:
+                print(f"Warning: Could not read file '{file_path}', skipping")
                 continue
-            
-            # Fix issues in file
-            print(f"Fixing issues in {file_path.relative_to(project_path)}")
-            fixed_content = self._fix_file(file_path, content, language, issues)
-            
-            # If content was modified, add to fixed files
-            if fixed_content != content:
-                fixed_files[str(file_path)] = fixed_content
-                self.files_fixed += 1
                 
-                # Update project context
-                self._update_project_context(file_path, issues)
+            # Get project context for the file
+            file_context = self.project_context.get_file_analysis(str(abs_path))
+            
+            # Fix issues
+            fixed_content, tokens_used = self.llm_service.generate_fixes(
+                code=content,
+                language=language,
+                file_path=str(file_path),
+                issues=issues,
+                context=file_context.get("standard_analysis") if file_context else None
+            )
+            
+            # Update statistics
+            self.files_fixed += 1
+            self.issues_fixed += len(issues)
+            self.total_tokens += tokens_used
+            
+            # Add to fixed files
+            fixed_files[str(abs_path)] = fixed_content
         
-        print(f"Applied {self.fixes_applied} fixes to {self.files_fixed} files.")
+        print(f"Fixed {self.issues_fixed} issues across {self.files_fixed} files.")
         return fixed_files
     
-    def fix_file(self, file_path: Path, issues: List[Dict[str, Any]]) -> Optional[str]:
+    def _extract_file_issues(self, analysis_report: str) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Fix issues in a single file.
+        Extract file paths and issues from an analysis report.
         
         Args:
-            file_path: Path to the file
-            issues: List of issues to fix
-            
-        Returns:
-            Fixed content if modified, None otherwise
-        """
-        # Get file content and language
-        content, language = self.file_service.get_file_content(file_path)
-        
-        if not content or not language:
-            return None
-        
-        # Fix issues
-        fixed_content = self._fix_file(file_path, content, language, issues)
-        
-        # Update project context
-        if fixed_content != content:
-            self._update_project_context(file_path, issues)
-            
-        return fixed_content if fixed_content != content else None
-    
-    def _extract_file_analyses(self, analysis_report: str) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Extract file analyses from analysis report.
-        
-        Args:
-            analysis_report: Analysis report content
+            analysis_report: Content of the analysis report
             
         Returns:
             Dictionary mapping file paths to lists of issues
         """
-        file_analyses = {}
+        file_issues = {}
         
-        # Check if the report is JSON
-        try:
-            # Try to parse as JSON
-            data = json.loads(analysis_report)
-            
-            # Extract file analyses from JSON
-            if "file_analyses" in data:
-                for file_path, analysis in data["file_analyses"].items():
-                    if "issues" in analysis:
-                        file_analyses[file_path] = analysis["issues"]
-            
-            return file_analyses
-        except json.JSONDecodeError:
-            # Not JSON, parse as markdown/text
-            pass
+        # Regular expression to find file sections in the report
+        file_pattern = r"^## File: (.+)$"
+        issue_pattern = r"^### Issue #\d+\s*(?:\(Lines?\s+([\d-]+)\))?:\s*(.+?)$"
         
-        # Parse markdown/text format
-        # Look for file headings (# File: path/to/file.py)
-        file_pattern = r"#\s*File:\s*(.+?)(?:\n|$)"
-        file_matches = re.finditer(file_pattern, analysis_report)
+        current_file = None
+        current_issues = []
         
-        for file_match in file_matches:
-            file_path = file_match.group(1).strip()
-            
-            # Find the section for this file
-            start_pos = file_match.end()
-            next_file_match = re.search(file_pattern, analysis_report[start_pos:])
-            end_pos = start_pos + next_file_match.start() if next_file_match else len(analysis_report)
-            file_section = analysis_report[start_pos:end_pos]
-            
-            # Extract issues
-            issues = []
-            
-            # Look for issue sections
-            issue_pattern = r"(?:Issue|Problem|Bug|Error|Warning)\s+\#?\d*\s*:\s*(.+?)(?:\n|$)"
-            issue_matches = re.finditer(issue_pattern, file_section)
-            
-            for issue_match in issue_matches:
-                desc = issue_match.group(1).strip()
-                # Try to find line number
-                line_match = re.search(r"(?:Line|Lines)\s+(\d+(?:-\d+)?)", file_section[issue_match.start():issue_match.end()])
-                line_number = line_match.group(1) if line_match else None
+        for line in analysis_report.split("\n"):
+            # Check if this is a file header
+            file_match = re.match(file_pattern, line)
+            if file_match:
+                # If we were already processing a file, save its issues
+                if current_file and current_issues:
+                    file_issues[current_file] = current_issues
+                    
+                # Start a new file
+                current_file = file_match.group(1)
+                current_issues = []
+                continue
                 
-                issues.append({
+            # If we're not processing a file yet, skip
+            if not current_file:
+                continue
+                
+            # Check if this is an issue
+            issue_match = re.match(issue_pattern, line)
+            if issue_match:
+                line_number = issue_match.group(1)
+                description = issue_match.group(2).strip()
+                
+                # Add to current issues
+                current_issues.append({
                     "line_number": line_number,
-                    "description": desc,
-                    "fixed": False,
+                    "description": description,
+                    "fixed": False
                 })
-            
-            # If no issues found with specific pattern, try bullet points
-            if not issues:
-                bullet_pattern = r"(?:^\s*-\s*|\n\s*-\s*)(.+?)(?:\n|$)"
-                bullet_matches = re.finditer(bullet_pattern, file_section)
-                
-                for bullet_match in bullet_matches:
-                    desc = bullet_match.group(1).strip()
-                    if len(desc) > 10:  # Only add substantial descriptions
-                        issues.append({
-                            "line_number": None,
-                            "description": desc,
-                            "fixed": False,
-                        })
-            
-            # Add to file analyses
-            if issues:
-                file_analyses[file_path] = issues
         
-        return file_analyses
+        # Add the last file
+        if current_file and current_issues:
+            file_issues[current_file] = current_issues
+            
+        return file_issues
     
-    def _fix_file(
-        self,
-        file_path: Path,
-        content: str,
-        language: str,
-        issues: List[Dict[str, Any]]
-    ) -> str:
+    def apply_fixes(self, fixed_files: Dict[str, str], dry_run: bool = False) -> List[str]:
         """
-        Fix issues in a file.
+        Apply fixes to actual files.
         
         Args:
-            file_path: Path to the file
-            content: Content of the file
-            language: Programming language
-            issues: List of issues to fix
+            fixed_files: Dictionary mapping file paths to fixed content
+            dry_run: If True, don't actually modify files
             
         Returns:
-            Fixed content
+            List of paths to files that were modified
         """
-        # If no issues, return original content
-        if not issues:
-            return content
+        modified_files = []
         
-        # Get context from project
-        file_context = self.project_context.get_file_context(str(file_path))
-        
-        # Generate fixes with the LLM
-        fixed_content, tokens_used = self.llm_service.generate_fixes(
-            code=content,
-            language=language,
-            file_path=str(file_path),
-            issues=issues,
-            context=file_context
-        )
-        
-        # Verify fixed content
-        if not fixed_content or not fixed_content.strip():
-            print(f"  Warning: Generated fix for {file_path.name} is empty, using original content.")
-            return content
-        
-        # Check if fixed content is valid for the language
-        is_valid = self.file_service.validate_code(fixed_content, language)
-        if not is_valid:
-            print(f"  Warning: Generated fix for {file_path.name} is not valid {language}, using original content.")
-            return content
-        
-        # Update stats
-        self.fixes_applied += len(issues)
-        
-        return fixed_content
-    
-    def _update_project_context(self, file_path: Path, issues: List[Dict[str, Any]]) -> None:
-        """
-        Update project context with fixed issues.
-        
-        Args:
-            file_path: Path to the file
-            issues: List of issues that were fixed
-        """
-        # Mark issues as fixed
-        for issue in issues:
-            issue["fixed"] = True
-        
-        # Get existing file analysis from context
-        file_analysis = self.project_context.get_file_analysis(str(file_path))
-        
-        if file_analysis:
-            # Update existing issues
-            if "issues" in file_analysis:
-                for i, existing_issue in enumerate(file_analysis["issues"]):
-                    for fixed_issue in issues:
-                        if existing_issue["description"] == fixed_issue["description"]:
-                            file_analysis["issues"][i]["fixed"] = True
+        for file_path, fixed_content in fixed_files.items():
+            path = Path(file_path)
             
-            # Update file analysis in context
-            self.project_context.update_file_analysis(str(file_path), file_analysis)
+            # Compare with original content
+            original_content, _ = self.file_service.get_file_content(path)
+            if original_content == fixed_content:
+                print(f"No changes needed for {path}")
+                continue
+                
+            if dry_run:
+                print(f"Would modify: {path}")
+            else:
+                # Create backup
+                backup_path = path.with_suffix(path.suffix + ".bak")
+                with open(backup_path, "w") as f:
+                    f.write(original_content)
+                    
+                # Write fixed content
+                with open(path, "w") as f:
+                    f.write(fixed_content)
+                    
+                print(f"Modified: {path} (backup at {backup_path})")
+            
+            modified_files.append(str(path))
         
-        # Update file context
-        self.project_context.update_file_context(
-            file_path=str(file_path),
-            context=f"Fixed issues: {', '.join(issue['description'][:50] + '...' if len(issue['description']) > 50 else issue['description'] for issue in issues)}"
-        )
+        return modified_files
