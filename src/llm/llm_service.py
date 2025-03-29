@@ -356,25 +356,47 @@ class LLMService:
                 )
                 response.raise_for_status()
                 
-                # Parse response
-                response_data = response.json()
-                
-                # Extract response text
-                generated_text = response_data.get("response", "")
-                
-                # Get token usage
-                tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
-                
-                # Update statistics
-                self.total_tokens_used += tokens_used
-                self.total_requests += 1
-                self.total_time += time.time() - start_time
-                
-                # Print response summary
-                resp_summary = generated_text[:100] + "..." if len(generated_text) > 100 else generated_text
-                print(f"  Received response ({tokens_used} tokens): {resp_summary}")
-                
-                return generated_text, tokens_used
+                # Safely parse the response, handling multiline JSON responses
+                try:
+                    # Try to parse as a single JSON object first
+                    response_data = self._safe_parse_json(response.text)
+                    
+                    # Extract response text
+                    generated_text = response_data.get("response", "")
+                    
+                    # Get token usage
+                    tokens_used = response_data.get("eval_count", 0) + response_data.get("prompt_eval_count", 0)
+                    
+                    # Update statistics
+                    self.total_tokens_used += tokens_used
+                    self.total_requests += 1
+                    self.total_time += time.time() - start_time
+                    
+                    # Print response summary
+                    resp_summary = generated_text[:100] + "..." if len(generated_text) > 100 else generated_text
+                    print(f"  Received response ({tokens_used} tokens): {resp_summary}")
+                    
+                    return generated_text, tokens_used
+                    
+                except json.JSONDecodeError as e:
+                    # Fallback for streaming response or other non-standard formats
+                    print(f"  Warning: JSON parsing failed, trying to extract response manually: {e}")
+                    # Try to extract the response text from the raw response
+                    generated_text = self._extract_response_from_text(response.text)
+                    if not generated_text:
+                        print(f"  Failed to extract response from text: {response.text[:200]}...")
+                        raise Exception(f"Unable to parse Ollama response: {e}")
+                    
+                    # Estimate token usage based on response length
+                    tokens_used = len(generated_text.split()) * 2  # Rough estimate
+                    
+                    # Update statistics with estimated values
+                    self.total_tokens_used += tokens_used
+                    self.total_requests += 1
+                    self.total_time += time.time() - start_time
+                    
+                    print(f"  Manually extracted response ({tokens_used} est. tokens): {generated_text[:100]}...")
+                    return generated_text, tokens_used
                 
             except requests.exceptions.Timeout:
                 print(f"  Warning: Request to Ollama API timed out after {config.TIMEOUT_SECONDS} seconds - Attempt {attempt+1}/{max_retries}")
@@ -397,16 +419,6 @@ class LLMService:
                     print("  Max retries exceeded.")
                     return f"Error calling LLM API after {max_retries} attempts: {e}", 0
             
-            except json.JSONDecodeError as e:
-                print(f"  Error parsing JSON response: {e} - Attempt {attempt+1}/{max_retries}")
-                if attempt < max_retries - 1:
-                    print(f"  Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
-                else:
-                    print("  Max retries exceeded.")
-                    return f"Error parsing LLM response after {max_retries} attempts: {e}", 0
-            
             except Exception as e:
                 print(f"  Unexpected error: {e} - Attempt {attempt+1}/{max_retries}")
                 traceback.print_exc()
@@ -417,6 +429,79 @@ class LLMService:
                 else:
                     print("  Max retries exceeded.")
                     return f"Unexpected error after {max_retries} attempts: {e}", 0
+    
+    def _safe_parse_json(self, text: str) -> Dict[str, Any]:
+        """
+        Safely parse JSON, handling potential issues with Ollama responses.
+        
+        Args:
+            text: JSON text to parse
+            
+        Returns:
+            Parsed JSON object
+        """
+        # If it's a single clean JSON object
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to find the first complete JSON object in the text
+        json_pattern = r'(\{.*?\})'
+        matches = re.findall(json_pattern, text, re.DOTALL)
+        
+        for potential_json in matches:
+            try:
+                return json.loads(potential_json)
+            except json.JSONDecodeError:
+                continue
+        
+        # If we get here, we couldn't find a valid JSON object
+        raise json.JSONDecodeError("No valid JSON found in response", text, 0)
+    
+    def _extract_response_from_text(self, text: str) -> str:
+        """
+        Extract the response from text when JSON parsing fails.
+        
+        Args:
+            text: Raw response text
+            
+        Returns:
+            Extracted response text
+        """
+        # Split the response by lines and look for the content
+        lines = text.strip().split('\n')
+        
+        # If there's only one line, return it directly
+        if len(lines) == 1:
+            return lines[0]
+        
+        # Check for streaming response format with multiple JSON objects
+        collected_text = ""
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            try:
+                # Try to parse each line as a JSON object
+                json_obj = json.loads(line)
+                if "response" in json_obj:
+                    collected_text += json_obj["response"]
+            except json.JSONDecodeError:
+                # If not valid JSON, just add the line
+                collected_text += line + " "
+        
+        # If we collected anything, return it
+        if collected_text:
+            return collected_text
+            
+        # Fallback - return everything after the first line (assuming first line might be an error)
+        if len(lines) > 1:
+            return "\n".join(lines[1:])
+        
+        # Last resort - return the original text
+        return text
     
     def _extract_code_block(self, text: str, language: str) -> Optional[str]:
         """
