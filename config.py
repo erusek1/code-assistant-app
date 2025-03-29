@@ -21,6 +21,10 @@ ANALYSIS_TEMPERATURE = 0.7  # Higher temperature for more critical analysis
 FIX_TEMPERATURE = 0.2  # Lower temperature for more conservative fixes
 TIMEOUT_SECONDS = 120  # 2 minutes timeout for LLM calls
 
+# File size limits
+MAX_FILE_SIZE_MB = 5  # Skip files larger than this size
+MAX_LINES_PER_FILE = 1000  # Truncate files with more lines than this
+
 # File extensions to analyze
 CODE_EXTENSIONS = {
     # Python
@@ -101,3 +105,12 @@ ANALYSIS_TYPES = [
 # External API configuration
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_API_VERSION = ""  # Temporarily empty to try direct /api/generate endpoint
+
+# Retry settings for API calls
+MAX_RETRIES = 3
+INITIAL_RETRY_DELAY = 2  # seconds
+RETRY_BACKOFF_FACTOR = 2  # exponential backoff multiplier
+
+# JSON response handling
+ALLOW_PARTIAL_JSON = True  # Extract valid JSON from potentially corrupt responses
+USE_TEXT_FALLBACK = True   # Fall back to raw text when JSON parsing fails
