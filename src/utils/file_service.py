@@ -69,39 +69,44 @@ class FileService:
             
         language = config.CODE_EXTENSIONS[extension]
         
-        # Special handling for JSON files
-        if extension == '.json':
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                    # Parse the JSON to validate it, but return the raw text
-                    data = json.load(f)
-                
-                # Re-read the file as text
-                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-                
-                return content, language
-            except json.JSONDecodeError as e:
-                print(f"Error parsing JSON file '{file_path}': {e}")
-                # Still return the content so we can analyze the invalid JSON
+        # Special handling based on file type
+        try:
+            # JSON files - validate structure
+            if extension == '.json':
                 try:
+                    # Try to parse JSON to validate it, then read raw content
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                        json.load(f)
+                    
+                    # If successful, read file as text
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    
+                    return content, language
+                except json.JSONDecodeError as e:
+                    print(f"Note: JSON parsing error in '{file_path}': {e}")
+                    # Still return the content so we can analyze the invalid JSON
                     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                         content = f.read()
                     return content, language
-                except Exception as e:
-                    print(f"Error reading file '{file_path}': {e}")
-                    return None, None
-            except Exception as e:
-                print(f"Error reading file '{file_path}': {e}")
-                return None, None
-        else:
-            # Regular file handling for non-JSON files
+            
+            # Regular files - just read as text
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+                return content, language
+        except Exception as e:
+            # Handle any other errors
+            print(f"Error reading file '{file_path}': {e}")
+            
+            # Try binary mode as fallback for troublesome files
             try:
-                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
+                with open(file_path, "rb") as f:
+                    binary_content = f.read()
+                    # Convert binary to string with explicit error handling
+                    content = binary_content.decode("utf-8", errors="replace")
                     return content, language
-            except Exception as e:
-                print(f"Error reading file '{file_path}': {e}")
+            except Exception as e2:
+                print(f"Binary fallback also failed for '{file_path}': {e2}")
                 return None, None
     
     def get_file_info(self, file_path: Path) -> Dict[str, Any]:
